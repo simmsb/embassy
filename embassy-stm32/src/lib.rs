@@ -59,6 +59,8 @@ pub mod sdmmc;
 pub mod spi;
 #[cfg(usart)]
 pub mod usart;
+#[cfg(all(usb, feature = "nightly"))]
+pub mod usb;
 #[cfg(feature = "usb-otg")]
 pub mod usb_otg;
 

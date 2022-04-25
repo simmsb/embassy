@@ -1,15 +1,18 @@
 #![macro_use]
 
 use core::marker::PhantomData;
+use core::slice;
 use core::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 use core::task::Poll;
 use embassy::interrupt::InterruptExt;
-use embassy::time::{Duration, Timer};
+use embassy::time::{block_for, Duration, Timer};
 use embassy::util::Unborrow;
 use embassy::waitqueue::AtomicWaker;
 use embassy_hal_common::unborrow;
 use embassy_usb::control::Request;
-use embassy_usb::driver::{self, EndpointAllocError, EndpointError, Event};
+use embassy_usb::driver::{
+    self, EndpointAllocError, EndpointError, EndpointOut, Event, Unsupported,
+};
 use embassy_usb::types::{EndpointAddress, EndpointInfo, EndpointType, UsbDirection};
 use futures::future::poll_fn;
 use futures::Future;
@@ -23,11 +26,54 @@ use crate::rcc::low_level::RccPeripheral;
 
 const NEW_AW: AtomicWaker = AtomicWaker::new();
 static BUS_WAKER: AtomicWaker = NEW_AW;
-static EP0_WAKER: AtomicWaker = NEW_AW;
-static EP_IN_WAKERS: [AtomicWaker; 8] = [NEW_AW; 8];
-static EP_OUT_WAKERS: [AtomicWaker; 8] = [NEW_AW; 8];
+static EP_IN_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
+static EP_OUT_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
 static READY_ENDPOINTS: AtomicU32 = AtomicU32::new(0);
 static IRQ_FLAGS: AtomicU32 = AtomicU32::new(0);
+const IRQ_FLAG_RESET: u32 = 0x0001;
+const IRQ_FLAG_SUSPEND: u32 = 0x0002;
+const IRQ_FLAG_RESUME: u32 = 0x0004;
+
+fn ep_mem_reg(index: usize) -> *mut u16 {
+    let mul = if EP_MEMORY_ACCESS_2X16 { 1 } else { 2 };
+    unsafe { (EP_MEMORY_ADDR as *mut u16).add(index * mul) }
+}
+fn ep_in_addr(index: usize) -> *mut u16 {
+    ep_mem_reg(index * 4 + 0)
+}
+fn ep_in_len(index: usize) -> *mut u16 {
+    ep_mem_reg(index * 4 + 1)
+}
+fn ep_out_addr(index: usize) -> *mut u16 {
+    ep_mem_reg(index * 4 + 2)
+}
+fn ep_out_len(index: usize) -> *mut u16 {
+    ep_mem_reg(index * 4 + 3)
+}
+
+// Returns (actual_len, len_bits)
+fn calc_out_len(len: u16) -> (u16, u16) {
+    match len {
+        2..=62 => ((len + 1) / 2 * 2, ((len + 1) / 2) << 10),
+        63..=480 => ((len + 31) / 32 * 32, (((len + 31) / 32 - 1) << 10) | 0x8000),
+        _ => panic!("invalid OUT length {}", len),
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+struct EndpointBuffer {
+    addr: u16,
+    len: u16,
+}
+
+impl EndpointBuffer {
+    fn read(&mut self) {
+        let ptr = unsafe { (EP_MEMORY_ADDR as *mut u8).add(self.addr as usize) };
+        let s = unsafe { slice::from_raw_parts(ptr, self.len as usize) };
+        info!("EP data: {:02x}", s)
+    }
+}
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -40,7 +86,8 @@ struct EndpointData {
 
 pub struct Driver<'d, T: Instance> {
     phantom: PhantomData<&'d mut T>,
-    alloc: Vec<EndpointData, 8>,
+    alloc: Vec<EndpointData, EP_COUNT>,
+    ep_mem_free: u16, // first free address in EP mem, in bytes.
 }
 
 impl<'d, T: Instance> Driver<'d, T> {
@@ -55,7 +102,27 @@ impl<'d, T: Instance> Driver<'d, T> {
         irq.unpend();
         irq.enable();
 
+        let regs = T::regs();
+
         unsafe {
+            crate::peripherals::PWR::enable();
+
+            pac::PWR
+                .cr2()
+                .modify(|w| w.set_usv(pac::pwr::vals::Usv::VALID));
+
+            <T as RccPeripheral>::enable();
+            <T as RccPeripheral>::reset();
+
+            regs.cntr().write(|w| {
+                w.set_pdwn(true);
+                w.set_fres(true);
+            });
+
+            block_for(Duration::from_millis(100));
+
+            regs.btable().write(|w| w.set_btable(0));
+
             dp.set_as_af(dp.af_num(), AFType::OutputPushPull);
             dm.set_as_af(dm.af_num(), AFType::OutputPushPull);
         }
@@ -63,6 +130,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         Self {
             phantom: PhantomData,
             alloc: Vec::new(),
+            ep_mem_free: EP_COUNT as u16 * 8, // for each EP, 4 regs, so 8 bytes
         }
     }
 
@@ -72,38 +140,64 @@ impl<'d, T: Instance> Driver<'d, T> {
             let x = regs.istr().read().0;
             info!("USB IRQ: {:08x}", x);
 
-            // mask of all the enabled irqs
-            let mut mask = regs::Istr(0);
-            mask.set_wkup(true);
-            mask.set_susp(true);
-            mask.set_reset(true);
-
             let istr = regs.istr().read();
 
-            let flags = istr.0 & mask.0;
-            if flags != 0 {
-                // Ideally we'd disable (mask) the irq and then let main thread check the bit
-                // in ISTR, but it's not possible to atomically mask IRQs in CNTR.
-                // Instead, send the flags to main thread through an atomic ourselves.
-                IRQ_FLAGS.fetch_or(flags, Ordering::AcqRel);
+            let mut flags: u32 = 0;
+
+            if istr.susp() {
+                info!("USB IRQ: susp");
+                flags |= IRQ_FLAG_SUSPEND;
+                regs.cntr().modify(|w| {
+                    w.set_fsusp(true);
+                    w.set_lpmode(true);
+                })
+            }
+
+            if istr.wkup() {
+                info!("USB IRQ: wkup");
+                flags |= IRQ_FLAG_RESUME;
+                regs.cntr().modify(|w| {
+                    w.set_fsusp(false);
+                    w.set_lpmode(false);
+                })
+            }
+
+            if istr.reset() {
+                info!("USB IRQ: reset");
+                flags |= IRQ_FLAG_RESET;
 
                 // Write 0 to clear.
-                regs.istr().write_value(regs::Istr(!flags));
+                let mut clear = regs::Istr(!0);
+                clear.set_reset(false);
+                regs.istr().write_value(clear);
+            }
+
+            if flags != 0 {
+                // Send irqs to main thread.
+                IRQ_FLAGS.fetch_or(flags, Ordering::AcqRel);
+                BUS_WAKER.wake();
+
+                // Clear them
+                let mut mask = regs::Istr(0);
+                mask.set_wkup(true);
+                mask.set_susp(true);
+                mask.set_reset(true);
+                regs.istr().write_value(regs::Istr(!(istr.0 & mask.0)));
             }
 
             if istr.ctr() {
                 let index = istr.ep_id() as usize;
                 let mut epr = regs.epr(index).read();
-                let mut ready_mask: u32 = 0;
                 if epr.ctr_rx() {
                     info!("EP {} RX, setup={}", index, epr.setup());
-                    ready_mask |= Out::mask(index);
+                    READY_ENDPOINTS.fetch_or(Out::mask(index), Ordering::AcqRel);
+                    EP_OUT_WAKERS[index].wake();
                 }
                 if epr.ctr_tx() {
                     info!("EP {} TX", index);
-                    ready_mask |= In::mask(index);
+                    READY_ENDPOINTS.fetch_or(In::mask(index), Ordering::AcqRel);
+                    EP_IN_WAKERS[index].wake();
                 }
-                READY_ENDPOINTS.fetch_or(ready_mask, Ordering::AcqRel);
                 epr.set_dtog_rx(false);
                 epr.set_dtog_tx(false);
                 epr.set_stat_rx(vals::StatRx(0));
@@ -135,14 +229,15 @@ impl<'d, T: Instance> Driver<'d, T> {
         Err(EndpointAllocError)
     }
 
-    fn alloc_endpoint<Dir>(
+    fn alloc_endpoint<D: Dir>(
         &mut self,
         ep_addr: Option<EndpointAddress>,
         ep_type: EndpointType,
         max_packet_size: u16,
         interval: u8,
-        is_out: bool,
-    ) -> Result<Endpoint<'d, T, Dir>, driver::EndpointAllocError> {
+    ) -> Result<Endpoint<'d, T, D>, driver::EndpointAllocError> {
+        let is_out = D::is_out();
+
         trace!(
             "allocating addr={:?} type={:?} mps={:?} interval={}, out={}",
             ep_addr,
@@ -185,19 +280,51 @@ impl<'d, T: Instance> Driver<'d, T> {
         };
 
         let ep = &mut self.alloc[index];
-        trace!("  index={} ep={:?}", index, ep);
         assert!(ep.ep_type == ep_type);
         if let Some(ep_addr) = ep_addr {
             assert!(ep.ep_addr == ep_addr.index() as _);
         }
 
-        if is_out {
+        let buf = if is_out {
             assert!(!ep.used_out);
             ep.used_out = true;
+
+            let addr = self.ep_mem_free;
+            let (len, len_bits) = calc_out_len(max_packet_size);
+
+            if addr + len > EP_MEMORY_SIZE as _ {
+                panic!("Endpoint memory full");
+            }
+            self.ep_mem_free += len;
+
+            trace!("  len_bits = {:04x}", len_bits);
+            unsafe {
+                ep_out_addr(index).write_volatile(addr);
+                ep_out_len(index).write_volatile(len_bits);
+            }
+
+            EndpointBuffer { addr, len }
         } else {
             assert!(!ep.used_in);
             ep.used_in = true;
-        }
+
+            let addr = self.ep_mem_free;
+            let len = (max_packet_size + 1) / 2 * 2;
+
+            if addr + len > EP_MEMORY_SIZE as _ {
+                panic!("Endpoint memory full");
+            }
+            self.ep_mem_free += len;
+
+            unsafe {
+                ep_in_addr(index).write_volatile(addr);
+                // ep_in_len is written when actually TXing packets.
+            }
+
+            EndpointBuffer { addr, len }
+        };
+
+        trace!("  index={} ep={:?} buf={:?}", index, ep, buf);
 
         let ep_addr = EndpointAddress::from_parts(index, UsbDirection::In);
         Ok(Endpoint {
@@ -209,6 +336,7 @@ impl<'d, T: Instance> Driver<'d, T> {
                 max_packet_size,
                 interval,
             },
+            buf,
         })
     }
 }
@@ -218,80 +346,62 @@ impl<'d, T: Instance> driver::Driver<'d> for Driver<'d, T> {
     type EndpointIn = Endpoint<'d, T, In>;
     type ControlPipe = ControlPipe<'d, T>;
     type Bus = Bus<'d, T>;
-    type EnableFuture = impl Future<Output = Self::Bus> + 'd;
 
     fn alloc_endpoint_in(
         &mut self,
-        ep_addr: Option<EndpointAddress>,
         ep_type: EndpointType,
         max_packet_size: u16,
         interval: u8,
     ) -> Result<Self::EndpointIn, driver::EndpointAllocError> {
-        self.alloc_endpoint(ep_addr, ep_type, max_packet_size, interval, false)
+        self.alloc_endpoint(None, ep_type, max_packet_size, interval)
     }
 
     fn alloc_endpoint_out(
         &mut self,
-        ep_addr: Option<EndpointAddress>,
         ep_type: EndpointType,
         max_packet_size: u16,
         interval: u8,
     ) -> Result<Self::EndpointOut, driver::EndpointAllocError> {
-        self.alloc_endpoint(ep_addr, ep_type, max_packet_size, interval, true)
+        self.alloc_endpoint(None, ep_type, max_packet_size, interval)
     }
 
     fn alloc_control_pipe(
         &mut self,
         max_packet_size: u16,
     ) -> Result<Self::ControlPipe, driver::EndpointAllocError> {
-        self.alloc_endpoint_out(Some(0x00.into()), EndpointType::Control, max_packet_size, 0)?;
-        self.alloc_endpoint_in(Some(0x80.into()), EndpointType::Control, max_packet_size, 0)?;
+        let ep_out =
+            self.alloc_endpoint(Some(0x00.into()), EndpointType::Control, max_packet_size, 0)?;
+        let ep_in =
+            self.alloc_endpoint(Some(0x80.into()), EndpointType::Control, max_packet_size, 0)?;
         Ok(ControlPipe {
             _phantom: PhantomData,
             max_packet_size,
+            ep_out,
+            ep_in,
         })
     }
 
-    fn enable(self) -> Self::EnableFuture {
-        async move {
-            let regs = T::regs();
+    fn into_bus(self) -> Self::Bus {
+        let regs = T::regs();
 
-            unsafe {
-                crate::peripherals::PWR::enable();
+        unsafe {
+            regs.cntr().write(|w| {
+                w.set_pdwn(false);
+                w.set_fres(false);
+                w.set_resetm(true);
+                w.set_suspm(true);
+                w.set_wkupm(true);
+                w.set_ctrm(true);
+            });
 
-                pac::PWR
-                    .cr2()
-                    .modify(|w| w.set_usv(pac::pwr::vals::Usv::VALID));
+            #[cfg(usb_v2)]
+            regs.bcdr().write(|w| w.set_dppu(true))
+        }
 
-                <T as RccPeripheral>::enable();
-                <T as RccPeripheral>::reset();
+        trace!("enabled");
 
-                regs.cntr().write(|w| {
-                    w.set_pdwn(true);
-                    w.set_fres(true);
-                });
-
-                Timer::after(Duration::from_millis(100)).await;
-
-                regs.btable().write(|w| w.set_btable(0));
-                regs.cntr().write(|w| {
-                    w.set_pdwn(false);
-                    w.set_fres(false);
-                    w.set_resetm(true);
-                    w.set_suspm(true);
-                    w.set_wkupm(true);
-                    w.set_ctrm(true);
-                });
-
-                #[cfg(usb_v2)]
-                regs.bcdr().write(|w| w.set_dppu(true))
-            }
-
-            trace!("enabled");
-
-            Bus {
-                phantom: PhantomData,
-            }
+        Bus {
+            phantom: PhantomData,
         }
     }
 }
@@ -308,27 +418,33 @@ impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
             BUS_WAKER.register(cx.waker());
             let regs = T::regs();
 
-            let istr = regs::Istr(IRQ_FLAGS.load(Ordering::Acquire));
+            let flags = IRQ_FLAGS.load(Ordering::Acquire);
 
-            if istr.wkup() {
-                let mut mask = regs::Istr(!0);
-                mask.set_wkup(false);
-                IRQ_FLAGS.fetch_and(mask.0, Ordering::AcqRel);
-
-                // Required by datasheet
-                regs.cntr().modify(|w| w.set_fsusp(false));
+            if flags & IRQ_FLAG_RESUME != 0 {
+                IRQ_FLAGS.fetch_and(!IRQ_FLAG_RESUME, Ordering::AcqRel);
                 return Poll::Ready(Event::Resume);
             }
-            if istr.reset() {
-                let mut mask = regs::Istr(!0);
-                mask.set_reset(false);
-                IRQ_FLAGS.fetch_and(mask.0, Ordering::AcqRel);
+
+            if flags & IRQ_FLAG_RESET != 0 {
+                IRQ_FLAGS.fetch_and(!IRQ_FLAG_RESET, Ordering::AcqRel);
+
+                trace!("RESET REGS WRITINGINGING");
+                regs.daddr().write(|w| {
+                    w.set_ef(true);
+                    w.set_add(0);
+                });
+
+                regs.epr(2).write(|w| {
+                    w.set_ep_type(vals::EpType::CONTROL);
+                    w.set_stat_rx(vals::StatRx::VALID);
+                    w.set_stat_tx(vals::StatTx::NAK);
+                });
+
                 return Poll::Ready(Event::Reset);
             }
-            if istr.susp() {
-                let mut mask = regs::Istr(!0);
-                mask.set_susp(false);
-                IRQ_FLAGS.fetch_and(mask.0, Ordering::AcqRel);
+
+            if flags & IRQ_FLAG_SUSPEND != 0 {
+                IRQ_FLAGS.fetch_and(!IRQ_FLAG_SUSPEND, Ordering::AcqRel);
                 return Poll::Ready(Event::Suspend);
             }
 
@@ -337,72 +453,53 @@ impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
     }
 
     #[inline]
-    fn reset(&mut self) {
-        self.set_configured(false);
-        let regs = T::regs();
-
-        unsafe {
-            trace!("RESET REGS WRITINGINGING");
-            regs.daddr().write(|w| {
-                w.set_ef(true);
-                w.set_add(0);
-            });
-
-            regs.epr(0).write(|w| {
-                w.set_ep_type(vals::EpType::CONTROL);
-                w.set_stat_rx(vals::StatRx::VALID);
-                w.set_stat_tx(vals::StatTx::NAK);
-            });
-        }
-    }
-
-    #[inline]
-    fn set_configured(&mut self, configured: bool) {
-        let regs = T::regs();
-
-        // TODO
-
-        for i in 1..=7 {
-            In::waker(i).wake();
-            Out::waker(i).wake();
-        }
-    }
-
-    #[inline]
-    fn set_device_address(&mut self, _addr: u8) {
+    fn set_address(&mut self, _addr: u8) {
         // Nothing to do, the peripheral handles this.
     }
 
-    fn set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
+    fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
+        // todo
+    }
+
+    fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
         Driver::<T>::set_stalled(ep_addr, stalled)
     }
 
-    fn is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
+    fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
         Driver::<T>::is_stalled(ep_addr)
     }
 
-    #[inline]
-    fn suspend(&mut self) {
-        let regs = T::regs();
-        // TODO
+    type EnableFuture<'a> = impl Future<Output = ()> + 'a where Self: 'a;
+
+    fn enable(&mut self) -> Self::EnableFuture<'_> {
+        async move {}
     }
 
-    #[inline]
-    fn resume(&mut self) {
-        let regs = T::regs();
-        // TODO
+    type DisableFuture<'a> = impl Future<Output = ()> + 'a where Self: 'a;
+
+    fn disable(&mut self) -> Self::DisableFuture<'_> {
+        async move {}
+    }
+
+    type RemoteWakeupFuture<'a> =  impl Future<Output = Result<(), Unsupported>> + 'a where Self: 'a;
+
+    fn remote_wakeup(&mut self) -> Self::RemoteWakeupFuture<'_> {
+        async move { Err(Unsupported) }
     }
 }
 
-pub enum Out {}
-pub enum In {}
-
-trait EndpointDir {
+trait Dir {
+    fn is_out() -> bool;
     fn waker(i: usize) -> &'static AtomicWaker;
     fn mask(i: usize) -> u32;
 }
 
-impl EndpointDir for In {
+pub enum In {}
+impl Dir for In {
+    fn is_out() -> bool {
+        false
+    }
+
     #[inline]
     fn waker(i: usize) -> &'static AtomicWaker {
         &EP_IN_WAKERS[i - 1]
@@ -414,7 +511,12 @@ impl EndpointDir for In {
     }
 }
 
-impl EndpointDir for Out {
+pub enum Out {}
+impl Dir for Out {
+    fn is_out() -> bool {
+        true
+    }
+
     #[inline]
     fn waker(i: usize) -> &'static AtomicWaker {
         &EP_OUT_WAKERS[i - 1]
@@ -430,9 +532,10 @@ pub struct Endpoint<'d, T: Instance, Dir> {
     _phantom: PhantomData<(&'d mut T, Dir)>,
     info: EndpointInfo,
     index: u8,
+    buf: EndpointBuffer,
 }
 
-impl<'d, T: Instance, Dir: EndpointDir> driver::Endpoint for Endpoint<'d, T, Dir> {
+impl<'d, T: Instance, D: Dir> driver::Endpoint for Endpoint<'d, T, D> {
     fn info(&self) -> &EndpointInfo {
         &self.info
     }
@@ -452,7 +555,7 @@ impl<'d, T: Instance, Dir: EndpointDir> driver::Endpoint for Endpoint<'d, T, Dir
         assert!(i != 0);
 
         poll_fn(move |cx| {
-            Dir::waker(i).register(cx.waker());
+            D::waker(i).register(cx.waker());
             Poll::Pending
 
             /*
@@ -472,6 +575,23 @@ impl<'d, T: Instance> driver::EndpointOut for Endpoint<'d, T, Out> {
 
     fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> Self::ReadFuture<'a> {
         async move {
+            warn!("WAITING");
+            poll_fn(|cx| {
+                let index = self.index as usize;
+                EP_OUT_WAKERS[index].register(cx.waker());
+
+                if READY_ENDPOINTS.load(Ordering::Acquire) & Out::mask(index) != 0 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            warn!("DONE");
+
+            let index = self.index as usize;
+            info!("len {:02x}", unsafe { ep_out_len(index).read_volatile() });
+            self.buf.read();
             todo!();
         }
     }
@@ -490,6 +610,8 @@ impl<'d, T: Instance> driver::EndpointIn for Endpoint<'d, T, In> {
 pub struct ControlPipe<'d, T: Instance> {
     _phantom: PhantomData<&'d mut T>,
     max_packet_size: u16,
+    ep_in: Endpoint<'d, T, In>,
+    ep_out: Endpoint<'d, T, Out>,
 }
 
 impl<'d, T: Instance> driver::ControlPipe for ControlPipe<'d, T> {
@@ -503,6 +625,9 @@ impl<'d, T: Instance> driver::ControlPipe for ControlPipe<'d, T> {
 
     fn setup<'a>(&'a mut self) -> Self::SetupFuture<'a> {
         async move {
+            let mut buf = [0; 64];
+            let res = self.ep_out.read(&mut buf).await;
+            warn!("SETUP read res {:?}", res);
             loop {
                 Timer::after(Duration::from_secs(1)).await;
             }
@@ -575,12 +700,16 @@ foreach_interrupt!(
 
 );
 
+// TODO cfgs
+const EP_COUNT: usize = 8;
+
 #[cfg(any(stm32l0, stm32l1))]
 const DP_PULL_UP_FEATURE: bool = true;
 #[cfg(any(stm32f1, stm32f3, stm32l4, stm32l5))]
 const DP_PULL_UP_FEATURE: bool = false;
 
-const EP_MEMORY: *const () = 0x4000_6000 as _;
+// TODO cfgs
+const EP_MEMORY_ADDR: *mut u16 = 0x4000d800 as _;
 
 #[cfg(any(stm32f1, stm32l1, stm32f303xb, stm32f303xc))]
 const EP_MEMORY_SIZE: usize = 512;

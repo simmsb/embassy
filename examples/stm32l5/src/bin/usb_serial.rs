@@ -18,7 +18,7 @@ use embassy_stm32::usb::{Driver, Instance};
 use embassy_stm32::{pac, peripherals};
 use embassy_stm32::{Config, Peripherals};
 use embassy_usb::driver::EndpointError;
-use embassy_usb::UsbDeviceBuilder;
+use embassy_usb::Builder;
 use embassy_usb_serial::{CdcAcmClass, State};
 use futures::future::join;
 use panic_probe as _;
@@ -32,7 +32,7 @@ fn config() -> Config {
         PLLClkDiv::Div2,
         PLLSrcDiv::Div1,
         PLLMul::Mul8,
-        Some(PLLClkDiv::Div2),
+        None,
     );
     config.rcc.hsi48 = true;
 
@@ -51,6 +51,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     // Create embassy-usb Config
     let config = embassy_usb::Config::new(0xc0de, 0xcafe);
+    //config.max_packet_size_0 = 64;
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     // It needs some buffers for building the descriptors.
@@ -61,20 +62,21 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     let mut state = State::new();
 
-    let mut builder = UsbDeviceBuilder::new(
+    let mut builder = Builder::new(
         driver,
         config,
         &mut device_descriptor,
         &mut config_descriptor,
         &mut bos_descriptor,
         &mut control_buf,
+        None,
     );
 
     // Create classes on the builder.
     let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
 
     // Build the builder.
-    let mut usb = builder.build().await;
+    let mut usb = builder.build();
 
     // Run the USB device.
     let usb_fut = usb.run();

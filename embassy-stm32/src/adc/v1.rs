@@ -57,7 +57,14 @@ pub struct Temperature;
 impl AdcPin<ADC1> for Temperature {}
 impl super::SealedAdcPin<ADC1> for Temperature {
     fn channel(&self) -> u8 {
-        16
+        #[cfg(adc_l0)]
+        {
+            18
+        }
+        #[cfg(not(adc_l0))]
+        {
+            16
+        }
     }
 }
 

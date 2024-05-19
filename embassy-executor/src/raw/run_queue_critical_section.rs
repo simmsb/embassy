@@ -55,7 +55,7 @@ impl RunQueue {
 
     pub(crate) fn empty(&self) -> bool {
         critical_section::with(|cs| {
-            self.head.borrow(cs).is_none()
+            self.head.borrow(cs).get().is_none()
         })
     }
 

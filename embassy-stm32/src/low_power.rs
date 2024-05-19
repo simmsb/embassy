@@ -198,6 +198,8 @@ impl Executor {
 
         let stop_mode = self.stop_mode();
 
+        trace!("low power: stop2: {}, stop1: {}", unsafe { crate::rcc::REFCOUNT_STOP2 }, unsafe { crate::rcc::REFCOUNT_STOP1 });
+
         if stop_mode.is_none() {
             trace!("low power: not ready to stop");
             return;

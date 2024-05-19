@@ -192,33 +192,36 @@ impl Executor {
     }
 
     fn configure_pwr(&mut self) {
-        self.scb.clear_sleepdeep();
+        critical_section::with(|cs| {
+            self.scb.clear_sleepdeep();
 
-        compiler_fence(Ordering::SeqCst);
+            compiler_fence(Ordering::SeqCst);
 
-        let stop_mode = self.stop_mode();
+            let stop_mode = self.stop_mode();
 
-        trace!("low power: stop2: {}, stop1: {}", unsafe { crate::rcc::REFCOUNT_STOP2 }, unsafe { crate::rcc::REFCOUNT_STOP1 });
+            trace!("low power: stop2: {}, stop1: {}", unsafe { crate::rcc::REFCOUNT_STOP2 }, unsafe { crate::rcc::REFCOUNT_STOP1 });
 
-        if stop_mode.is_none() {
-            trace!("low power: not ready to stop");
-            return;
-        }
+            if stop_mode.is_none() {
+                trace!("low power: not ready to stop");
+                return;
+            }
 
-        if self.time_driver.pause_time().is_err() {
-            trace!("low power: failed to pause time");
-            return;
-        }
+            if self.time_driver.pause_time().is_err() {
+                trace!("low power: failed to pause time");
+                return;
+            }
 
-        let stop_mode = stop_mode.unwrap();
-        match stop_mode {
-            StopMode::Stop1 => trace!("low power: stop 1"),
-            StopMode::Stop2 => trace!("low power: stop 2"),
-        }
-        self.configure_stop(stop_mode);
+            let stop_mode = stop_mode.unwrap();
+            match stop_mode {
+                StopMode::Stop1 => trace!("low power: stop 1"),
+                StopMode::Stop2 => trace!("low power: stop 2"),
+            }
+            self.configure_stop(stop_mode);
 
-        #[cfg(not(feature = "low-power-debug-with-sleep"))]
-        self.scb.set_sleepdeep();
+            #[cfg(not(feature = "low-power-debug-with-sleep"))]
+            self.scb.set_sleepdeep();
+
+        })
     }
 
     /// Run the executor.

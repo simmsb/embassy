@@ -412,6 +412,10 @@ impl SyncExecutor {
                 self.timer_queue.update(p);
             });
 
+            if !self.run_queue.empty() {
+                continue;
+            }
+
             #[cfg(feature = "integrated-timers")]
             {
                 // If this is already in the past, set_alarm might return false

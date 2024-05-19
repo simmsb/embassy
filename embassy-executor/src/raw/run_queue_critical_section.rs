@@ -53,6 +53,12 @@ impl RunQueue {
         })
     }
 
+    pub(crate) fn empty(&self) -> bool {
+        critical_section::with(|cs| {
+            self.head.borrow(cs).is_none()
+        })
+    }
+
     /// Empty the queue, then call `on_task` for each task that was in the queue.
     /// NOTE: It is OK for `on_task` to enqueue more tasks. In this case they're left in the queue
     /// and will be processed by the *next* call to `dequeue_all`, *not* the current one.

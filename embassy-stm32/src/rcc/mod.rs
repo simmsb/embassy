@@ -39,13 +39,13 @@ use crate::time::Hertz;
 /// Must be written within a critical section
 ///
 /// May be read without a critical section
-pub(crate) static mut REFCOUNT_STOP1: u32 = 0;
+pub static mut REFCOUNT_STOP1: u32 = 0;
 
 #[cfg(feature = "low-power")]
 /// Must be written within a critical section
 ///
 /// May be read without a critical section
-pub(crate) static mut REFCOUNT_STOP2: u32 = 0;
+pub static mut REFCOUNT_STOP2: u32 = 0;
 
 /// Frozen clock frequencies
 ///

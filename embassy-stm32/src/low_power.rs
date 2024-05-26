@@ -72,7 +72,7 @@ foreach_interrupt! {
         #[interrupt]
         #[allow(non_snake_case)]
         unsafe fn $irq() {
-            EXECUTOR.as_mut().unwrap().on_wakeup_irq();
+            __on_wakeup_irq();
         }
     };
 }

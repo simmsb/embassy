@@ -77,9 +77,13 @@ foreach_interrupt! {
     };
 }
 
+extern "Rust" {
+    fn __on_wakeup_irq();
+}
+
 #[allow(dead_code)]
 pub(crate) unsafe fn on_wakeup_irq() {
-    EXECUTOR.as_mut().unwrap().on_wakeup_irq();
+    unsafe { __on_wakeup_irq() };
 }
 
 /// Configure STOP mode with RTC.

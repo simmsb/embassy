@@ -46,7 +46,7 @@ pub mod dma;
 pub mod gpio;
 pub mod rcc;
 #[cfg(feature = "_time-driver")]
-mod time_driver;
+pub mod time_driver;
 pub mod timer;
 
 // Sometimes-present hardware

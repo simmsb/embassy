@@ -594,10 +594,10 @@ impl Driver for RtcDriver {
 }
 
 #[cfg(feature = "low-power")]
-pub(crate) fn get_driver() -> &'static RtcDriver {
+pub fn get_driver() -> &'static RtcDriver {
     &DRIVER
 }
 
-pub(crate) fn init(cs: CriticalSection) {
+pub fn init(cs: CriticalSection) {
     DRIVER.init(cs)
 }

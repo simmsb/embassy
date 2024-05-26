@@ -458,7 +458,7 @@ impl RtcDriver {
     */
     #[cfg(feature = "low-power")]
     /// Set the rtc but panic if it's already been set
-    pub(crate) fn set_rtc(&self, rtc: &'static Rtc) {
+    pub fn set_rtc(&self, rtc: &'static Rtc) {
         critical_section::with(|cs| {
             rtc.stop_wakeup_alarm(cs);
 
@@ -468,11 +468,11 @@ impl RtcDriver {
 
     #[cfg(feature = "low-power")]
     /// The minimum pause time beyond which the executor will enter a low-power state.
-    pub(crate) const MIN_STOP_PAUSE: embassy_time::Duration = embassy_time::Duration::from_millis(250);
+    pub const MIN_STOP_PAUSE: embassy_time::Duration = embassy_time::Duration::from_millis(250);
 
     #[cfg(feature = "low-power")]
     /// Pause the timer if ready; return err if not
-    pub(crate) fn pause_time(&self) -> Result<(), ()> {
+    pub fn pause_time(&self) -> Result<(), ()> {
         critical_section::with(|cs| {
             /*
                 If the wakeup timer is currently running, then we need to stop it and
@@ -500,7 +500,7 @@ impl RtcDriver {
 
     #[cfg(feature = "low-power")]
     /// Resume the timer with the given offset
-    pub(crate) fn resume_time(&self) {
+    pub fn resume_time(&self) {
         if regs_gp16().cr1().read().cen() {
             // Time isn't currently stopped
 

@@ -433,7 +433,7 @@ impl Rtc {
     }
 
     #[cfg(feature = "low-power")]
-    pub(crate) fn enable_wakeup_line(&self) {
+    pub fn enable_wakeup_line(&self) {
         use crate::interrupt::typelevel::Interrupt;
         use crate::pac::EXTI;
 

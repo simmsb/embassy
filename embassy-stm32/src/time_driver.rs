@@ -251,7 +251,7 @@ impl AlarmState {
     }
 }
 
-pub(crate) struct RtcDriver {
+pub struct RtcDriver {
     /// Number of 2^15 periods elapsed since boot.
     period: AtomicU32,
     alarm_count: AtomicU8,

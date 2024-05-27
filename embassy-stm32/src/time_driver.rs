@@ -547,7 +547,7 @@ impl Driver for RtcDriver {
     }
 
     fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
-        info!("Setting alarm {} to {}", alarm.id(), timestamp);
+        trace!("Setting alarm {} to {}", alarm.id(), timestamp);
         critical_section::with(|cs| {
             let r = regs_gp16();
 

@@ -188,6 +188,14 @@ impl<'d, T: Instance, const N: u8, DMA> DacChannel<'d, T, N, DMA> {
         self.set_enable(false)
     }
 
+    pub fn set_output_buffer(&mut self, on: bool) {
+        critical_section::with(|_| {
+            T::regs().cr().modify(|reg| {
+                reg.set_boff(Self::IDX, !on)
+            });
+        });
+    }
+
     /// Set the trigger source for this channel.
     ///
     /// This method disables the channel, so you may need to re-enable afterwards.

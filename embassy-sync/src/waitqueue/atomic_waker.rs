@@ -21,10 +21,10 @@ impl AtomicWaker {
     pub fn register(&self, w: &Waker) {
         critical_section::with(|cs| {
             let cell = self.waker.borrow(cs);
-            cell.set(match cell.replace(None) {
-                Some(w2) if (w2.will_wake(w)) => Some(w2),
-                _ => Some(w.clone()),
-            })
+            cell.set(Some(w.clone())) // match cell.replace(None) {
+                                      //     Some(w2) if (w2.will_wake(w)) => Some(w2),
+                                      //     _ => Some(w.clone()),
+                                      // })
         })
     }
 

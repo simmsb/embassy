@@ -108,7 +108,7 @@ impl Timer {
     /// This method is a convenience wrapper for calling `Timer::after(Duration::from_ticks())`.
     /// For more details, refer to [`Timer::after()`] and [`Duration::from_ticks()`].
     #[inline]
-    pub fn after_ticks(ticks: u64) -> Self {
+    pub fn after_ticks(ticks: u32) -> Self {
         Self::after(Duration::from_ticks(ticks))
     }
 
@@ -117,7 +117,7 @@ impl Timer {
     /// This method is a convenience wrapper for calling `Timer::after(Duration::from_nanos())`.
     /// For more details, refer to [`Timer::after()`] and [`Duration::from_nanos()`].
     #[inline]
-    pub fn after_nanos(nanos: u64) -> Self {
+    pub fn after_nanos(nanos: u32) -> Self {
         Self::after(Duration::from_nanos(nanos))
     }
 
@@ -126,7 +126,7 @@ impl Timer {
     /// This method is a convenience wrapper for calling `Timer::after(Duration::from_micros())`.
     /// For more details, refer to [`Timer::after()`] and [`Duration::from_micros()`].
     #[inline]
-    pub fn after_micros(micros: u64) -> Self {
+    pub fn after_micros(micros: u32) -> Self {
         Self::after(Duration::from_micros(micros))
     }
 
@@ -135,7 +135,7 @@ impl Timer {
     /// This method is a convenience wrapper for calling `Timer::after(Duration::from_millis())`.
     /// For more details, refer to [`Timer::after`] and [`Duration::from_millis()`].
     #[inline]
-    pub fn after_millis(millis: u64) -> Self {
+    pub fn after_millis(millis: u32) -> Self {
         Self::after(Duration::from_millis(millis))
     }
 
@@ -144,7 +144,7 @@ impl Timer {
     /// This method is a convenience wrapper for calling `Timer::after(Duration::from_secs())`.
     /// For more details, refer to [`Timer::after`] and [`Duration::from_secs()`].
     #[inline]
-    pub fn after_secs(secs: u64) -> Self {
+    pub fn after_secs(secs: u32) -> Self {
         Self::after(Duration::from_secs(secs))
     }
 }

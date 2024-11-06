@@ -19,7 +19,7 @@
 //! struct MyTimerQueue{}; // not public!
 //!
 //! impl TimerQueue for MyTimerQueue {
-//!     fn schedule_wake(&'static self, at: u64, waker: &Waker) {
+//!     fn schedule_wake(&'static self, at: u32, waker: &Waker) {
 //!         todo!()
 //!     }
 //! }
@@ -32,15 +32,15 @@ use core::task::Waker;
 pub trait TimerQueue {
     /// Schedules a waker in the queue to be awoken at moment `at`.
     /// If this moment is in the past, the waker might be awoken immediately.
-    fn schedule_wake(&'static self, at: u64, waker: &Waker);
+    fn schedule_wake(&'static self, at: u32, waker: &Waker);
 }
 
 extern "Rust" {
-    fn _embassy_time_schedule_wake(at: u64, waker: &Waker);
+    fn _embassy_time_schedule_wake(at: u32, waker: &Waker);
 }
 
 /// Schedule the given waker to be woken at `at`.
-pub fn schedule_wake(at: u64, waker: &Waker) {
+pub fn schedule_wake(at: u32, waker: &Waker) {
     unsafe { _embassy_time_schedule_wake(at, waker) }
 }
 
@@ -53,7 +53,7 @@ macro_rules! timer_queue_impl {
         static $name: $t = $val;
 
         #[no_mangle]
-        fn _embassy_time_schedule_wake(at: u64, waker: &core::task::Waker) {
+        fn _embassy_time_schedule_wake(at: u32, waker: &core::task::Waker) {
             <$t as $crate::TimerQueue>::schedule_wake(&$name, at, waker);
         }
     };

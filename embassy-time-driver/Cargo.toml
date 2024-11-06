@@ -64,6 +64,8 @@ tick-hz-64 = []
 tick-hz-100 = []
 ## 128Hz Tick Rate
 tick-hz-128 = []
+## 250Hz Tick Rate
+tick-hz-250 = []
 ## 256Hz Tick Rate
 tick-hz-256 = []
 ## 512Hz Tick Rate

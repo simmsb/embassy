@@ -21,8 +21,8 @@
 //!
 //! Instead of the usual "trait + generic params" approach, calls from embassy to the driver are done via `extern` functions.
 //!
-//! `embassy` internally defines the driver functions as `extern "Rust" { fn _embassy_time_now() -> u64; }` and calls them.
-//! The driver crate defines the functions as `#[no_mangle] fn _embassy_time_now() -> u64`. The linker will resolve the
+//! `embassy` internally defines the driver functions as `extern "Rust" { fn _embassy_time_now() -> u32; }` and calls them.
+//! The driver crate defines the functions as `#[no_mangle] fn _embassy_time_now() -> u32`. The linker will resolve the
 //! calls from the `embassy` crate to call into the driver crate.
 //!
 //! If there is none or multiple drivers in the crate tree, linking will fail.
@@ -43,7 +43,7 @@
 //! struct MyDriver{} // not public!
 //!
 //! impl Driver for MyDriver {
-//!     fn now(&self) -> u64 {
+//!     fn now(&self) -> u32 {
 //!         todo!()
 //!     }
 //!     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
@@ -52,7 +52,7 @@
 //!     fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
 //!         todo!()
 //!     }
-//!     fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
+//!     fn set_alarm(&self, alarm: AlarmHandle, timestamp: u32) -> bool {
 //!         todo!()
 //!     }
 //! }
@@ -68,7 +68,7 @@ mod tick;
 /// Ticks per second of the global timebase.
 ///
 /// This value is specified by the [`tick-*` Cargo features](crate#tick-rate)
-pub const TICK_HZ: u64 = tick::TICK_HZ;
+pub const TICK_HZ: u32 = tick::TICK_HZ;
 
 /// Alarm handle, assigned by the driver.
 #[derive(Clone, Copy)]
@@ -104,7 +104,7 @@ pub trait Driver: Send + Sync + 'static {
     ///   10_000 years from now.). This means if your hardware only has 16bit/32bit timers
     ///   you MUST extend them to 64-bit, for example by counting overflows in software,
     ///   or chaining multiple timers together.
-    fn now(&self) -> u64;
+    fn now(&self) -> u32;
 
     /// Try allocating an alarm handle. Returns None if no alarms left.
     /// Initially the alarm has no callback set, and a null `ctx` pointer.
@@ -167,18 +167,18 @@ pub trait Driver: Send + Sync + 'static {
     ///
     /// This means implementations need to be careful to avoid timestamp overflows. The recommendation is to make `timestamp`
     /// be in the same units as hardware ticks to avoid any conversions, which makes avoiding overflow easier.
-    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool;
+    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u32) -> bool;
 }
 
 extern "Rust" {
-    fn _embassy_time_now() -> u64;
+    fn _embassy_time_now() -> u32;
     fn _embassy_time_allocate_alarm() -> Option<AlarmHandle>;
     fn _embassy_time_set_alarm_callback(alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ());
-    fn _embassy_time_set_alarm(alarm: AlarmHandle, timestamp: u64) -> bool;
+    fn _embassy_time_set_alarm(alarm: AlarmHandle, timestamp: u32) -> bool;
 }
 
 /// See [`Driver::now`]
-pub fn now() -> u64 {
+pub fn now() -> u32 {
     unsafe { _embassy_time_now() }
 }
 
@@ -195,7 +195,7 @@ pub fn set_alarm_callback(alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut (
 }
 
 /// See [`Driver::set_alarm`]
-pub fn set_alarm(alarm: AlarmHandle, timestamp: u64) -> bool {
+pub fn set_alarm(alarm: AlarmHandle, timestamp: u32) -> bool {
     unsafe { _embassy_time_set_alarm(alarm, timestamp) }
 }
 
@@ -208,7 +208,7 @@ macro_rules! time_driver_impl {
         static $name: $t = $val;
 
         #[no_mangle]
-        fn _embassy_time_now() -> u64 {
+        fn _embassy_time_now() -> u32 {
             <$t as $crate::Driver>::now(&$name)
         }
 
@@ -223,7 +223,7 @@ macro_rules! time_driver_impl {
         }
 
         #[no_mangle]
-        fn _embassy_time_set_alarm(alarm: $crate::AlarmHandle, timestamp: u64) -> bool {
+        fn _embassy_time_set_alarm(alarm: $crate::AlarmHandle, timestamp: u32) -> bool {
             <$t as $crate::Driver>::set_alarm(&$name, alarm, timestamp)
         }
     };

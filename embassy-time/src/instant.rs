@@ -7,14 +7,14 @@ use super::{Duration, GCD_1K, GCD_1M, TICK_HZ};
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 /// An Instant in time, based on the MCU's clock ticks since startup.
 pub struct Instant {
-    ticks: u64,
+    ticks: u32,
 }
 
 impl Instant {
     /// The smallest (earliest) value that can be represented by the `Instant` type.
-    pub const MIN: Instant = Instant { ticks: u64::MIN };
+    pub const MIN: Instant = Instant { ticks: u32::MIN };
     /// The largest (latest) value that can be represented by the `Instant` type.
-    pub const MAX: Instant = Instant { ticks: u64::MAX };
+    pub const MAX: Instant = Instant { ticks: u32::MAX };
 
     /// Returns an Instant representing the current time.
     pub fn now() -> Instant {
@@ -24,48 +24,48 @@ impl Instant {
     }
 
     /// Create an Instant from a tick count since system boot.
-    pub const fn from_ticks(ticks: u64) -> Self {
+    pub const fn from_ticks(ticks: u32) -> Self {
         Self { ticks }
     }
 
     /// Create an Instant from a microsecond count since system boot.
-    pub const fn from_micros(micros: u64) -> Self {
+    pub const fn from_micros(micros: u32) -> Self {
         Self {
             ticks: micros * (TICK_HZ / GCD_1M) / (1_000_000 / GCD_1M),
         }
     }
 
     /// Create an Instant from a millisecond count since system boot.
-    pub const fn from_millis(millis: u64) -> Self {
+    pub const fn from_millis(millis: u32) -> Self {
         Self {
             ticks: millis * (TICK_HZ / GCD_1K) / (1000 / GCD_1K),
         }
     }
 
     /// Create an Instant from a second count since system boot.
-    pub const fn from_secs(seconds: u64) -> Self {
+    pub const fn from_secs(seconds: u32) -> Self {
         Self {
             ticks: seconds * TICK_HZ,
         }
     }
 
     /// Tick count since system boot.
-    pub const fn as_ticks(&self) -> u64 {
+    pub const fn as_ticks(&self) -> u32 {
         self.ticks
     }
 
     /// Seconds since system boot.
-    pub const fn as_secs(&self) -> u64 {
+    pub const fn as_secs(&self) -> u32 {
         self.ticks / TICK_HZ
     }
 
     /// Milliseconds since system boot.
-    pub const fn as_millis(&self) -> u64 {
+    pub const fn as_millis(&self) -> u32 {
         self.ticks * (1000 / GCD_1K) / (TICK_HZ / GCD_1K)
     }
 
     /// Microseconds since system boot.
-    pub const fn as_micros(&self) -> u64 {
+    pub const fn as_micros(&self) -> u32 {
         self.ticks * (1_000_000 / GCD_1M) / (TICK_HZ / GCD_1M)
     }
 
@@ -73,7 +73,7 @@ impl Instant {
     /// Panics on over/underflow.
     pub fn duration_since(&self, earlier: Instant) -> Duration {
         Duration {
-            ticks: unwrap!(self.ticks.checked_sub(earlier.ticks)),
+            ticks: self.ticks - earlier.ticks,
         }
     }
 
@@ -120,8 +120,9 @@ impl Add<Duration> for Instant {
     type Output = Instant;
 
     fn add(self, other: Duration) -> Instant {
-        self.checked_add(other)
-            .expect("overflow when adding duration to instant")
+        Instant { ticks: self.ticks + other.ticks }
+        // self.checked_add(other)
+        //     .expect("overflow when adding duration to instant")
     }
 }
 
@@ -135,8 +136,9 @@ impl Sub<Duration> for Instant {
     type Output = Instant;
 
     fn sub(self, other: Duration) -> Instant {
-        self.checked_sub(other)
-            .expect("overflow when subtracting duration from instant")
+        Instant { ticks: self.ticks - other.ticks }
+        // self.checked_sub(other)
+        //     .expect("overflow when subtracting duration from instant")
     }
 }
 
